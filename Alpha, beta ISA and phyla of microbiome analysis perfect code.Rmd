@@ -1,0 +1,1148 @@
+---
+title: "New Microbiome analysis version 2.0"
+author: "Sri Sai Nandini Ravi"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+
+library(agricolae)
+library(tidyverse)  # for data manipulation and plotting
+library(readxl)     # for reading Excel files
+library(reshape2)   # for reshaping data
+library(ggplot2)    # for plotting
+library(phyloseq)
+library(dplyr)
+library(vegan)
+library(ALDEx2)
+library(indicspecies)
+library(Hmisc)     # For Spearman's correlation
+library(igraph)    # For network analysis
+library(ggraph)    # For network visualization
+library(tidygraph) # For handling network objects
+library(dplyr)     # For data wrangling
+```
+
+
+```{r}
+ASV_16s <- read.csv ("Greenhouse_16S_ASV_table_sort.csv")
+ASV_ITS <- read.csv("Greenhouse_ITS_ASV_table_sort.csv")
+MD <- read_xlsx("GreenhouseMetadata.xlsx")
+MD <- MD %>%
+  mutate(Treatment = recode(Treatment, 
+                            "_+M+E" = "ME",
+                            "_-M+E" = "E",
+                            "_+M-E" = "M",
+                            "_-M-E" = "control"))
+```
+
+
+```{r}
+# Identify sample columns (assumes samples start with "FFAR")
+sample_columns_16s <- grep("^FFAR", colnames(ASV_16s), value = TRUE)
+sample_columns_ITS <- grep("^FFAR", colnames(ASV_ITS), value = TRUE)
+
+# Reshape 16S ASV table from wide to long format
+asv_16s_long <- ASV_16s %>%
+  pivot_longer(cols = all_of(sample_columns_16s), 
+               names_to = "sample_name", 
+               values_to = "Abundance") %>%
+  mutate(Abundance = as.numeric(Abundance))  # Ensure numeric values
+
+# Reshape ITS ASV table from wide to long format
+asv_ITS_long <- ASV_ITS %>%
+  pivot_longer(cols = all_of(sample_columns_ITS), 
+               names_to = "sample_name", 
+               values_to = "Abundance") %>%
+  mutate(Abundance = as.numeric(Abundance))  # Ensure numeric values
+
+# Merge ASV data with metadata
+m_16s <- asv_16s_long %>%
+  inner_join(MD, by = "sample_name")  # Ensure sample names match
+
+m_ITS <- asv_ITS_long %>%
+  inner_join(MD, by = "sample_name")  # Ensure sample names match
+
+# Check the first few rows
+head(m_16s)
+head(m_ITS)
+```
+
+```{r}
+# Convert filtered 16S data to phyloseq format
+otu_16s <- m_16s %>%
+  select(OTU_ID, sample_name, Abundance) %>%
+  pivot_wider(names_from = sample_name, values_from = Abundance, values_fill = 0) %>%
+  column_to_rownames("OTU_ID") %>%
+  as.matrix() %>%
+  otu_table(taxa_are_rows = TRUE)
+
+sample_16s <- sample_data(MD %>% column_to_rownames("sample_name"))
+
+physeq_16s <- phyloseq(otu_16s, sample_16s)
+
+# Calculate Shannon diversity for 16S
+ShD_16s <- estimate_richness(physeq_16s, measures = "Shannon") %>%
+  rownames_to_column("sample_name") %>%
+  inner_join(MD, by = "sample_name")
+
+# Repeat for ITS data
+otu_ITS <- m_ITS %>%
+  select(OTU_ID, sample_name, Abundance) %>%
+  pivot_wider(names_from = sample_name, values_from = Abundance, values_fill = 0) %>%
+  column_to_rownames("OTU_ID") %>%
+  as.matrix() %>%
+  otu_table(taxa_are_rows = TRUE)
+
+sample_ITS <- sample_data(MD %>% column_to_rownames("sample_name"))
+
+physeq_ITS <- phyloseq(otu_ITS, sample_ITS)
+
+# Calculate Shannon diversity for ITS
+ShD_ITS <- estimate_richness(physeq_ITS, measures = "Shannon") %>%
+  rownames_to_column("sample_name") %>%
+  inner_join(MD, by = "sample_name")
+
+# View results
+head(ShD_16s)
+head(ShD_ITS)
+
+```
+
+
+```{r}
+# Boxplot for 16S Shannon Diversity with Correct Order
+ggplot(ShD_16s, aes(x = factor(Type, levels = c("root", "rhizo", "soil")), y = Shannon, fill = Treatment)) +
+  geom_boxplot() +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  labs(title = "Shannon Diversity (16S)", x = "Sample Type", y = "Shannon Index") +
+  theme(legend.position = "right")
+
+# Boxplot for ITS Shannon Diversity with Correct Order
+ggplot(ShD_ITS, aes(x = factor(Type, levels = c("root", "rhizo", "soil")), y = Shannon, fill = Treatment)) +
+  geom_boxplot() +
+  theme_minimal() +
+  scale_fill_viridis_d() +
+  labs(title = "Shannon Diversity (ITS)", x = "Sample Type", y = "Shannon Index") +
+  theme(legend.position = "right")
+
+```
+
+Here with the below code we make a bar plot with significance shown using alphabets. 
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(rstatix)
+
+# Step 1: Prepare data
+ShD_16s <- ShD_16s %>%
+  mutate(Group = paste(Type, Treatment, sep = "_"))
+
+# Step 2: Summary stats
+summary_16s <- ShD_16s %>%
+  group_by(Group) %>%
+  summarise(mean_shannon = mean(Shannon),
+            se_shannon = sd(Shannon) / sqrt(n()),
+            .groups = "drop")
+
+# Step 3: Run Dunn's test
+dunn_16s <- ShD_16s %>%
+  dunn_test(Shannon ~ Group, p.adjust.method = "fdr") %>%
+  add_significance("p.adj")
+
+# Step 4: Assign significance letters (compact letter display)
+library(emmeans)
+library(multcomp)
+library(multcompView)
+
+# Create a model and get compact letters
+model <- aov(Shannon ~ Group, data = ShD_16s)
+tukey <- TukeyHSD(model)
+letters <- multcompView::multcompLetters(tukey$Group[,"p adj"])$Letters
+letters_df <- data.frame(Group = names(letters), Letters = letters)
+
+# Step 5: Merge letters with summary table
+plot_data <- left_join(summary_16s, letters_df, by = "Group")
+
+# Step 6: Create bar plot with letters
+ggplot(plot_data, aes(x = Group, y = mean_shannon, fill = Group)) +
+  geom_col(width = 0.7) +
+  geom_errorbar(aes(ymin = mean_shannon - se_shannon, ymax = mean_shannon + se_shannon), width = 0.2) +
+  geom_text(aes(label = Letters, y = mean_shannon + se_shannon + 0.1), size = 5) +
+  scale_fill_viridis_d() +
+  labs(title = "Shannon Diversity (16S)", x = "Sample Type and Treatment", y = "Mean Shannon Index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+```
+
+here we made grouped bar plots.
+
+```{r}
+# Load packages again if needed
+library(dplyr)
+library(ggplot2)
+library(multcompView)
+
+# Step 1: Split 'Group' into 'Type' and 'Treatment' columns for clarity
+plot_data <- plot_data %>%
+  separate(Group, into = c("Type", "Treatment"), sep = "_") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")),
+         Treatment = factor(Treatment, levels = c("control", "E", "M", "ME")))
+
+# Step 2: Create grouped bar plot
+ggplot(plot_data, aes(x = Type, y = mean_shannon, fill = Treatment)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = mean_shannon - se_shannon, ymax = mean_shannon + se_shannon),
+                position = position_dodge(0.8), width = 0.2) +
+  geom_text(aes(label = Letters, y = mean_shannon + se_shannon + 0.1),
+            position = position_dodge(0.8), size = 5) +
+  scale_fill_viridis_d(option = "D") +
+  labs(title = "Shannon Diversity (16S)", x = "Sample Type", y = "Mean Shannon Index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 12),
+        legend.position = "right",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+```
+
+here we try to see the same signifcance using box plots. 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(multcompView)
+library(tidyr)
+library(viridis)
+
+# Step 1: Add Group column and format Type
+ShD_16s <- ShD_16s %>%
+  mutate(Group = paste(Type, Treatment, sep = "_"))
+ShD_16s$Type <- factor(ShD_16s$Type, levels = c("root", "rhizo", "soil"))
+
+# Step 2: Run ANOVA and Tukey HSD
+model_box <- aov(Shannon ~ Group, data = ShD_16s)
+tukey_box <- TukeyHSD(model_box)
+letters_box <- multcompLetters(tukey_box$Group[,"p adj"])$Letters
+letter_df_box <- data.frame(Group = names(letters_box), Letters = letters_box)
+
+# Step 3: Separate Group into Type and Treatment
+letter_df_box <- letter_df_box %>%
+  separate(Group, into = c("Type", "Treatment"), sep = "_") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")),
+         Treatment = factor(Treatment, levels = c("control", "E", "M", "ME")))
+
+# Step 4: Merge for label placement
+label_positions <- ShD_16s %>%
+  group_by(Type, Treatment) %>%
+  summarise(y_pos = max(Shannon) + 0.2, .groups = "drop") %>%
+  left_join(letter_df_box, by = c("Type", "Treatment"))
+
+# Step 5: Extract ANOVA p-value and format label
+anova_p <- summary(model_box)[[1]]["Group", "Pr(>F)"]
+anova_label <- paste0("ANOVA p = ", signif(anova_p, 3))
+
+# Step 6: Create plot
+ggplot(ShD_16s, aes(x = Type, y = Shannon, fill = Treatment)) +
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) +
+  geom_text(data = label_positions,
+            aes(x = Type, y = y_pos, group = Treatment, label = Letters),
+            position = position_dodge(0.8), size = 5) +
+  annotate("text", x = 1.5, y = max(ShD_16s$Shannon) + 0.5,
+           label = anova_label, size = 5, fontface = "bold") +
+  scale_fill_viridis_d() +
+  labs(title = "Shannon Diversity (16S)", x = "Sample Type", y = "Shannon Index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+```
+
+Now we are trying to make a box plot for ITS using the same technique as 16s 
+```{r}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(multcompView)
+library(tidyr)
+
+# Step 1: Add Group column for ITS
+ShD_ITS <- ShD_ITS %>%
+  mutate(Group = paste(Type, Treatment, sep = "_"))
+
+# ✅ Force desired order of x-axis (root → rhizo → soil)
+ShD_ITS$Type <- factor(ShD_ITS$Type, levels = c("root", "rhizo", "soil"))
+
+# Step 2: Run ANOVA and Tukey HSD
+model_ITS <- aov(Shannon ~ Group, data = ShD_ITS)
+tukey_ITS <- TukeyHSD(model_ITS)
+letters_ITS <- multcompLetters(tukey_ITS$Group[,"p adj"])$Letters
+letter_df_ITS <- data.frame(Group = names(letters_ITS), Letters = letters_ITS)
+
+# Step 3: Separate Group into Type and Treatment
+letter_df_ITS <- letter_df_ITS %>%
+  separate(Group, into = c("Type", "Treatment"), sep = "_") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")),
+         Treatment = factor(Treatment, levels = c("control", "E", "M", "ME")))
+
+# Step 4: Get y-position for each label
+label_positions_ITS <- ShD_ITS %>%
+  group_by(Type, Treatment) %>%
+  summarise(y_pos = max(Shannon) + 0.2, .groups = "drop") %>%
+  left_join(letter_df_ITS, by = c("Type", "Treatment"))
+
+# Step 5: Plot ITS grouped boxplot with letters
+ggplot(ShD_ITS, aes(x = Type, y = Shannon, fill = Treatment)) +
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) +
+  geom_text(data = label_positions_ITS,
+            aes(x = Type, y = y_pos, group = Treatment, label = Letters),
+            position = position_dodge(0.8), size = 5) +
+  scale_fill_viridis_d() +
+  labs(title = "Shannon Diversity (ITS)", x = "Sample Type", y = "Shannon Index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+
+```
+
+Beta Diversity, Here we make PCoA and also we show differnces between M and ME
+
+```{r}
+# Load libraries if not already
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(viridis)
+
+# -- 16S Ordination --
+bray_16s <- phyloseq::distance(physeq_16s, method = "bray")
+pcoa_16s <- ordinate(physeq_16s, method = "PCoA", distance = bray_16s)
+
+# ✅ Filter and run PERMANOVA for 16S
+MD_16s_filtered <- MD %>%
+  filter(sample_name %in% rownames(as.matrix(bray_16s))) %>%
+  drop_na(Type, Treatment)
+
+permanova_16s <- adonis2(bray_16s ~ Treatment, data = MD_16s_filtered, permutations = 999)
+r2_16s <- round(permanova_16s$R2[1], 3)
+pval_16s <- permanova_16s$`Pr(>F)`[1]
+
+# PCoA plot for 16S
+plot_16s <- plot_ordination(physeq_16s, pcoa_16s, color = "Treatment", shape = "Type") +
+  geom_point(size = 4, alpha = 0.8) +
+  stat_ellipse(type = "t", linetype = "dashed") +
+  scale_color_viridis_d() +
+  theme_minimal() +
+  labs(
+    title = "PCoA (16S) - Bray-Curtis",
+    subtitle = paste("PERMANOVA: R² =", r2_16s, ", p =", pval_16s),
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  )
+
+
+# -- ITS Ordination --
+bray_ITS <- phyloseq::distance(physeq_ITS, method = "bray")
+pcoa_ITS <- ordinate(physeq_ITS, method = "PCoA", distance = bray_ITS)
+
+# ✅ Filter and run PERMANOVA for ITS
+MD_ITS_filtered <- MD %>%
+  filter(sample_name %in% rownames(as.matrix(bray_ITS))) %>%
+  drop_na(Type, Treatment)
+
+permanova_ITS <- adonis2(bray_ITS ~ Treatment, data = MD_ITS_filtered, permutations = 999)
+r2_ITS <- round(permanova_ITS$R2[1], 3)
+pval_ITS <- permanova_ITS$`Pr(>F)`[1]
+
+# PCoA plot for ITS
+plot_ITS <- plot_ordination(physeq_ITS, pcoa_ITS, color = "Treatment", shape = "Type") +
+  geom_point(size = 4, alpha = 0.8) +
+  stat_ellipse(type = "t", linetype = "dashed") +
+  scale_color_viridis_d() +
+  theme_minimal() +
+  labs(
+    title = "PCoA (ITS) - Bray-Curtis",
+    subtitle = paste("PERMANOVA: R² =", r2_ITS, ", p =", pval_ITS),
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  )
+
+# Display both plots
+plot_16s
+plot_ITS
+
+
+```
+
+
+```{r}
+# Load libraries (if not already loaded)
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(viridis)
+library(tibble)
+
+# -- 16S Bray-Curtis distance and ordination --
+bray_16s <- phyloseq::distance(physeq_16s, method = "bray")
+pcoa_16s <- ordinate(physeq_16s, method = "PCoA", distance = bray_16s)
+
+# ✅ Filter metadata to match distance matrix
+MD_16s_filtered <- MD %>%
+  filter(sample_name %in% rownames(as.matrix(bray_16s))) %>%
+  drop_na(Type, Treatment)
+
+# ✅ Fix: Run PERMANOVA without Type
+permanova_16s <- adonis2(bray_16s ~ Treatment, data = MD_16s_filtered, permutations = 999)
+
+# Extract R² and p-value
+r2_16s <- round(permanova_16s$R2[1], 3)          # [1] because now Treatment is first
+pval_16s <- permanova_16s$`Pr(>F)`[1]
+
+# Create ordination dataframe and join metadata
+ord_df_16s <- plot_ordination(physeq_16s, pcoa_16s, justDF = TRUE) %>%
+  tibble::rownames_to_column("sample_name") %>%
+  left_join(MD, by = "sample_name") %>%
+  rename(
+    Treatment = Treatment.x,
+    Type = Type.x
+  )
+
+# Reorder facet levels: root → rhizo → soil
+ord_df_16s$Type <- factor(ord_df_16s$Type, levels = c("root", "rhizo", "soil"))
+
+# -- Create faceted PCoA plot with ellipses --
+ggplot(ord_df_16s, aes(x = Axis.1, y = Axis.2, color = Treatment)) +
+  geom_point(aes(shape = Type), size = 3, alpha = 0.9) +
+  stat_ellipse(type = "norm", level = 0.68, linetype = "dashed") +
+  facet_wrap(~Type) +
+  scale_color_viridis_d() +
+  theme_minimal() +
+  labs(
+    title = "PCoA (16S) - Bray-Curtis",
+    subtitle = paste("PERMANOVA (Treatment): R² =", r2_16s, ", p =", pval_16s),
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+```
+
+
+
+
+```{r}
+# Load required libraries
+library(phyloseq)
+library(ggplot2)
+library(vegan)
+library(dplyr)
+library(viridis)
+library(tibble)
+
+# -- ITS Bray-Curtis distance and ordination --
+bray_ITS <- phyloseq::distance(physeq_ITS, method = "bray")
+pcoa_ITS <- ordinate(physeq_ITS, method = "PCoA", distance = bray_ITS)
+
+# ✅ Filter metadata to match distance matrix and avoid NA issues
+MD_ITS_filtered <- MD %>%
+  filter(sample_name %in% rownames(as.matrix(bray_ITS))) %>%
+  drop_na(Type, Treatment)
+
+# ✅ Run PERMANOVA on Treatment only
+permanova_ITS <- adonis2(bray_ITS ~ Treatment, data = MD_ITS_filtered, permutations = 999)
+r2_ITS <- round(permanova_ITS$R2[1], 3)
+pval_ITS <- permanova_ITS$`Pr(>F)`[1]
+
+# Create ordination dataframe and join metadata
+ord_df_ITS <- plot_ordination(physeq_ITS, pcoa_ITS, justDF = TRUE) %>%
+  tibble::rownames_to_column("sample_name") %>%
+  left_join(MD, by = "sample_name") %>%
+  rename(
+    Treatment = Treatment.x,
+    Type = Type.x
+  )
+
+# Reorder facet levels: root → rhizo → soil
+ord_df_ITS$Type <- factor(ord_df_ITS$Type, levels = c("root", "rhizo", "soil"))
+
+# -- Create faceted PCoA plot with ellipses --
+ggplot(ord_df_ITS, aes(x = Axis.1, y = Axis.2, color = Treatment)) +
+  geom_point(aes(shape = Type), size = 3, alpha = 0.9) +
+  stat_ellipse(type = "norm", level = 0.68, linetype = "dashed") +
+  facet_wrap(~Type) +
+  scale_color_viridis_d() +
+  theme_minimal() +
+  labs(
+    title = "PCoA (ITS) - Bray-Curtis",
+    subtitle = paste("PERMANOVA (Treatment): R² =", r2_ITS, ", p =", pval_ITS),
+    x = "PCoA Axis 1",
+    y = "PCoA Axis 2"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold", size = 12),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+
+```
+
+Indicator species analysis
+
+```{r}
+# --- Load required libraries ---
+library(tidyverse)
+library(indicspecies)
+library(vegan)
+
+# --- STEP 1: Subset metadata ---
+Meta_root <- MD %>% filter(Type == "root")
+Meta_rhizo <- MD %>% filter(Type == "rhizo")
+Meta_soil <- MD %>% filter(Type == "soil")
+
+# --- ✅ STEP 2: Function to prep ASV matrix (fixed) ---
+prepare_matrix <- function(ASV, metadata) {
+  sample_cols <- metadata$sample_name
+  
+  # ✅ Fix: Move OTU_ID outside taxonomy_cols, match your column order
+  taxonomy_cols <- c("Taxon", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  
+  filtered <- ASV[, c("OTU_ID", taxonomy_cols, sample_cols)]
+  
+  mat <- filtered %>%
+    select(-all_of(taxonomy_cols)) %>%
+    column_to_rownames("OTU_ID") %>%
+    t() %>%
+    as.data.frame()
+  
+  list(matrix = mat, taxonomy = filtered[, c("OTU_ID", taxonomy_cols)])
+}
+
+# --- STEP 3: Prepare matrices ---
+asv_root <- prepare_matrix(ASV_16s, Meta_root)
+asv_rhizo <- prepare_matrix(ASV_16s, Meta_rhizo)
+asv_soil <- prepare_matrix(ASV_16s, Meta_soil)
+
+# --- STEP 4: Run ISA ---
+run_isa <- function(matrix, meta) {
+  group <- meta$Treatment[match(rownames(matrix), meta$sample_name)]
+  multipatt(matrix, group, func = "r.g", control = how(nperm = 999))
+}
+
+isa_root <- run_isa(asv_root$matrix, Meta_root)
+isa_rhizo <- run_isa(asv_rhizo$matrix, Meta_rhizo)
+isa_soil <- run_isa(asv_soil$matrix, Meta_soil)
+
+# --- STEP 5: Extract significant species ---
+get_sig_species <- function(isa_result, taxonomy, type) {
+  as.data.frame(isa_result$sign) %>%
+    rownames_to_column("OTU_ID") %>%
+    filter(p.value <= 0.05) %>%
+    left_join(taxonomy, by = "OTU_ID") %>%
+    mutate(SampleType = type)
+}
+```
+
+```{r}
+
+sig_root <- get_sig_species(isa_root, asv_root$taxonomy, "Root")
+sig_rhizo <- get_sig_species(isa_rhizo, asv_rhizo$taxonomy, "Rhizo")
+sig_soil <- get_sig_species(isa_soil, asv_soil$taxonomy, "Soil")
+sig_all <- bind_rows(sig_root, sig_rhizo, sig_soil)
+
+# --- Clean + Rename All Variables ---
+isa_results_clean <- sig_all %>%
+  filter(
+    !is.na(Species),
+    !grepl("uncultured|metagenome|metagenomic|environmental", Species, ignore.case = TRUE),
+    Species != ""
+  ) %>%
+  mutate(
+    Treatment = case_when(
+      s.control == 1 ~ "Control",
+      s.E == 1 ~ "E",
+      s.M == 1 ~ "M",
+      s.ME == 1 ~ "ME"
+    )
+  )
+# Step 1: Calculate rel. abundance per sample type
+abund_root <- calc_rel_abund(asv_root$matrix, asv_root$taxonomy, Meta_root, "Root")
+abund_rhizo <- calc_rel_abund(asv_rhizo$matrix, asv_rhizo$taxonomy, Meta_rhizo, "Rhizo")
+abund_soil <- calc_rel_abund(asv_soil$matrix, asv_soil$taxonomy, Meta_soil, "Soil")
+
+# ✅ Step 2: Combine into one master abundance table
+abund_all <- bind_rows(abund_root, abund_rhizo, abund_soil)
+
+# --- Merge with relative abundance ---
+isa_combined <- isa_results_clean %>%
+  left_join(abund_all, by = c("Species", "Treatment", "SampleType"))
+
+# --- Summarize to remove duplicates
+isa_summarized <- isa_combined %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(MeanAbundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop")
+
+# --- Select top 20 by total IndVal
+top20_clean_species <- isa_results_clean %>%
+  group_by(Species) %>%
+  summarise(TotalStat = sum(stat, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalStat)) %>%
+  slice_head(n = 20) %>%
+  pull(Species)
+
+# --- Filter for top 20
+isa_top20 <- isa_summarized %>%
+  filter(Species %in% top20_clean_species)
+
+# --- Pivot into clean wide format
+isa_top20_table <- isa_top20 %>%
+  mutate(Treatment = factor(Treatment, levels = c("Control", "M", "E", "ME"))) %>%
+  pivot_wider(
+    names_from = c(SampleType, Treatment),
+    values_from = MeanAbundance,
+    values_fn = mean
+  ) %>%
+  arrange(Species)
+
+```
+
+```{r}
+# --- Define expected column order for 16S ---
+expected_16s_cols <- expand.grid(
+  SampleType = c("Root", "Rhizo", "Soil"),
+  Treatment = c("Control", "M", "E", "ME")
+) %>%
+  mutate(col_id = paste(SampleType, Treatment, sep = "_")) %>%
+  pull(col_id)
+
+# --- Clean and order the table ---
+isa16s_summary_table_clean <- isa_combined %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(MeanAbundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+  filter(Species %in% top20_clean_species) %>%
+  mutate(col_id = paste(SampleType, Treatment, sep = "_")) %>%
+  select(Species, col_id, MeanAbundance) %>%
+  pivot_wider(names_from = col_id, values_from = MeanAbundance) %>%
+  tibble::add_column(!!!setNames(
+    lapply(setdiff(expected_16s_cols, names(.)), function(x) NA_real_),
+    setdiff(expected_16s_cols, names(.))
+  )) %>%
+  select(Species, all_of(expected_16s_cols))
+
+# --- Convert to percentage format ---
+isa16s_summary_table_percent <- isa16s_summary_table_clean %>%
+  mutate(across(where(is.numeric), ~ round(.x * 100, 2)))
+
+# --- View and Save ---
+View(isa16s_summary_table_percent)
+write.csv(isa16s_summary_table_percent, "ISA_16S_Top20_SummaryTable_Percent.csv", row.names = FALSE)
+
+```
+
+with P-Values
+
+```{r}
+# Filter p-values for top 20 species
+isa_16s_pvals <- isa_results_clean %>%
+  filter(Species %in% top20_clean_species) %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(p_value = min(p.value, na.rm = TRUE), .groups = "drop") %>%
+  mutate(col_id = paste(SampleType, Treatment, "pval", sep = "_"))
+isa_16s_abund <- isa16s_summary_table_percent %>%
+  pivot_longer(-Species, names_to = "col_id", values_to = "Abundance")
+# Combine both abundance and p-value into long format
+isa_16s_combined_long <- bind_rows(
+  isa_16s_abund %>% mutate(Metric = "Abundance"),
+  isa_16s_pvals %>% select(Species, col_id, p_value) %>%
+    rename(Abundance = p_value) %>%
+    mutate(Metric = "p-value")
+)
+
+```
+
+```{r}
+isa_16s_combined_wide <- isa_16s_combined_long %>%
+  mutate(col_id = paste(Metric, col_id, sep = "_")) %>%
+  select(-Metric) %>%
+  pivot_wider(names_from = col_id, values_from = Abundance)
+
+```
+
+```{r}
+# --- 1. Create column ID format ---
+isa_16s_combined <- isa_combined %>%
+  filter(Species %in% top20_clean_species) %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(
+    Abundance = mean(rel_abundance, na.rm = TRUE) * 100,
+    PValue = min(p.value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    col_abund = paste(SampleType, Treatment, "abund", sep = "_"),
+    col_pval = paste(SampleType, Treatment, "pval", sep = "_")
+  )
+
+# --- 2. Create long format table: One row per Species + one metric per column ---
+isa_abund_long <- isa_16s_combined %>%
+  select(Species, col_abund, Abundance) %>%
+  rename(value = Abundance, col_id = col_abund)
+
+isa_pval_long <- isa_16s_combined %>%
+  select(Species, col_pval, PValue) %>%
+  rename(value = PValue, col_id = col_pval)
+
+# --- 3. Combine abundance and pval ---
+isa_final_long <- bind_rows(isa_abund_long, isa_pval_long)
+
+# --- 4. Pivot to wide format ---
+isa_final_wide <- isa_final_long %>%
+  pivot_wider(names_from = col_id, values_from = value)
+
+# --- 5. Reorder columns by SampleType and Treatment ---
+ordered_cols <- expand.grid(
+  SampleType = c("Root", "Rhizo", "Soil"),
+  Treatment = c("Control", "M", "E", "ME"),
+  Metric = c("abund", "pval")
+) %>%
+  mutate(col_name = paste(SampleType, Treatment, Metric, sep = "_")) %>%
+  pull(col_name)
+
+isa_final_wide <- isa_final_wide %>%
+  select(Species, all_of(ordered_cols))
+
+# --- 6. View and Save ---
+View(isa_final_wide)
+write.csv(isa_final_wide, "ISA_16S_Top20_Abundance_Pval_SideBySide.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+# View in RStudio
+View(isa_16s_combined_wide)
+
+# Save as CSV
+write.csv(isa_16s_combined_wide, "ISA_16S_Top20_Abundance_Pval_Table.csv", row.names = FALSE)
+
+```
+
+
+
+```{r}
+isa_top20_table_percent <- isa_top20_table %>%
+  mutate(across(where(is.numeric), ~ round(.x * 100, 2)))
+
+write.csv(isa_top20_table_percent, "ISA_16s_Top20_RA_in_%.csv", row.names = FALSE)
+```
+
+Now for ITS
+
+```{r}
+# --- STEP 1: Subset metadata by sample type ---
+MetaITS_root <- MD %>% filter(Type == "root")
+MetaITS_rhizo <- MD %>% filter(Type == "rhizo")
+MetaITS_soil <- MD %>% filter(Type == "soil")
+
+# --- STEP 2: Function to prepare matrix ---
+prepare_its_matrix <- function(ASV, metadata) {
+  sample_cols <- metadata$sample_name
+  taxonomy_cols <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  
+  filtered <- ASV[, c("OTU_ID", taxonomy_cols, sample_cols)]
+  
+  mat <- filtered %>%
+    select(-all_of(taxonomy_cols)) %>%
+    column_to_rownames("OTU_ID") %>%
+    t() %>%
+    as.data.frame()
+  
+  list(matrix = mat, taxonomy = filtered[, c("OTU_ID", taxonomy_cols)])
+}
+MetaITS_root <- MetaITS_root %>%
+  filter(sample_name %in% colnames(ASV_ITS))
+
+MetaITS_rhizo <- MetaITS_rhizo %>%
+  filter(sample_name %in% colnames(ASV_ITS))
+
+MetaITS_soil <- MetaITS_soil %>%
+  filter(sample_name %in% colnames(ASV_ITS))
+
+
+# --- STEP 3: Prepare ITS matrices ---
+asvITS_root <- prepare_its_matrix(ASV_ITS, MetaITS_root)
+asvITS_rhizo <- prepare_its_matrix(ASV_ITS, MetaITS_rhizo)
+asvITS_soil <- prepare_its_matrix(ASV_ITS, MetaITS_soil)
+
+# --- STEP 4: Run Indicator Species Analysis ---
+run_isa_its <- function(matrix, meta) {
+  group <- meta$Treatment[match(rownames(matrix), meta$sample_name)]
+  multipatt(matrix, group, func = "r.g", control = how(nperm = 999))
+}
+
+isaITS_root <- run_isa_its(asvITS_root$matrix, MetaITS_root)
+isaITS_rhizo <- run_isa_its(asvITS_rhizo$matrix, MetaITS_rhizo)
+isaITS_soil <- run_isa_its(asvITS_soil$matrix, MetaITS_soil)
+
+# --- STEP 5: Extract significant ITS species and clean ---
+extract_its_sig <- function(isa_result, taxonomy, type) {
+  as.data.frame(isa_result$sign) %>%
+    rownames_to_column("OTU_ID") %>%
+    filter(p.value <= 0.05) %>%
+    left_join(taxonomy, by = "OTU_ID") %>%
+    mutate(SampleType = type)
+}
+
+sigITS_root <- extract_its_sig(isaITS_root, asvITS_root$taxonomy, "Root")
+sigITS_rhizo <- extract_its_sig(isaITS_rhizo, asvITS_rhizo$taxonomy, "Rhizo")
+sigITS_soil <- extract_its_sig(isaITS_soil, asvITS_soil$taxonomy, "Soil")
+
+sigITS_all <- bind_rows(sigITS_root, sigITS_rhizo, sigITS_soil)
+
+# --- STEP 6: Clean labels and calculate relative abundance ---
+sigITS_all <- sigITS_all %>%
+  filter(
+    !is.na(Species),
+    !grepl("uncultured|metagenome|metagenomic|environmental", Species, ignore.case = TRUE),
+    Species != ""
+  ) %>%
+  mutate(
+    Treatment = case_when(
+      s.control == 1 ~ "Control",
+      s.E == 1 ~ "E",
+      s.M == 1 ~ "M",
+      s.ME == 1 ~ "ME"
+    )
+  )
+
+calc_rel_abund_ITS <- function(matrix, taxonomy, metadata, type) {
+  rel_abund <- matrix / rowSums(matrix)
+  
+  rel_long <- as.data.frame(t(rel_abund)) %>%
+    rownames_to_column("OTU_ID") %>%
+    pivot_longer(-OTU_ID, names_to = "sample_name", values_to = "rel_abundance") %>%
+    left_join(taxonomy, by = "OTU_ID") %>%
+    left_join(metadata, by = "sample_name") %>%
+    group_by(Species, Treatment) %>%
+    summarise(rel_abundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop") %>%
+    mutate(SampleType = type)
+  
+  return(rel_long)
+}
+
+# --- STEP 7: Relative abundance for ITS ---
+abITS_root <- calc_rel_abund_ITS(asvITS_root$matrix, asvITS_root$taxonomy, MetaITS_root, "Root")
+abITS_rhizo <- calc_rel_abund_ITS(asvITS_rhizo$matrix, asvITS_rhizo$taxonomy, MetaITS_rhizo, "Rhizo")
+abITS_soil <- calc_rel_abund_ITS(asvITS_soil$matrix, asvITS_soil$taxonomy, MetaITS_soil, "Soil")
+abITS_all <- bind_rows(abITS_root, abITS_rhizo, abITS_soil)
+
+# --- STEP 8: Merge & summarize ---
+isaITS_merged <- sigITS_all %>%
+  left_join(abITS_all, by = c("Species", "Treatment", "SampleType")) %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(MeanAbundance = mean(rel_abundance, na.rm = TRUE), .groups = "drop")
+
+# --- STEP 9: Top 20 ITS indicator species
+top20_ITS <- sigITS_all %>%
+  group_by(Species) %>%
+  summarise(TotalStat = sum(stat, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalStat)) %>%
+  slice_head(n = 20) %>%
+  pull(Species)
+
+isaITS_top20 <- isaITS_merged %>%
+  filter(Species %in% top20_ITS)
+
+# --- STEP 10: Pivot to wide format table
+isaITS_summary_table <- isaITS_top20 %>%
+  mutate(Treatment = factor(Treatment, levels = c("Control", "M", "E", "ME"))) %>%
+  pivot_wider(
+    names_from = c(SampleType, Treatment),
+    values_from = MeanAbundance,
+    values_fn = mean
+  ) %>%
+  arrange(Species)
+
+```
+
+```{r}
+# --- Define the expected columns in correct order ---
+expected_its_cols <- expand.grid(
+  SampleType = c("Root", "Rhizo", "Soil"),
+  Treatment = c("Control", "M", "E", "ME")
+) %>%
+  mutate(col_id = paste(SampleType, Treatment, sep = "_")) %>%
+  pull(col_id)
+
+# --- Clean and reformat the ITS summary table ---
+isaITS_summary_table_clean <- isaITS_top20 %>%
+  mutate(Treatment = factor(Treatment, levels = c("Control", "M", "E", "ME"))) %>%
+  mutate(col_id = paste(SampleType, Treatment, sep = "_")) %>%
+  select(Species, col_id, MeanAbundance) %>%
+  pivot_wider(names_from = col_id, values_from = MeanAbundance) %>%
+  # Make sure to include all expected columns even if NA
+  tibble::add_column(!!!setNames(
+    lapply(setdiff(expected_its_cols, names(.)), function(x) NA_real_),
+    setdiff(expected_its_cols, names(.))
+  )) %>%
+  select(Species, all_of(expected_its_cols))
+
+# --- Convert to percent ---
+isaITS_summary_table_percent <- isaITS_summary_table_clean %>%
+  mutate(across(where(is.numeric), ~ round(.x * 100, 2)))
+
+# --- View in RStudio Viewer (optional) ---
+View(isaITS_summary_table_percent)
+
+# --- Export to CSV ---
+write.csv(isaITS_summary_table_percent, "ISA_ITS_Top20_SummaryTable_Percent.csv", row.names = FALSE)
+
+```
+
+```{r}
+# --- Filter to top 20 indicator species based on indicator value ---
+top20_species_ITS <- sigITS_all %>%
+  group_by(Species) %>%
+  summarise(total_stat = sum(stat, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(total_stat)) %>%
+  slice_head(n = 20) %>%
+  pull(Species)
+
+# --- Merge ITS abundance and p-value info ---
+isa_ITS_combined <- sigITS_all %>%
+  filter(Species %in% top20_species_ITS) %>%
+  left_join(abITS_all, by = c("Species", "Treatment", "SampleType")) %>%
+  group_by(Species, SampleType, Treatment) %>%
+  summarise(
+    Abundance = mean(rel_abundance, na.rm = TRUE) * 100,
+    PValue = min(p.value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    col_abund = paste(SampleType, Treatment, "abund", sep = "_"),
+    col_pval = paste(SampleType, Treatment, "pval", sep = "_")
+  )
+
+# --- Convert abundance and p-value into long format ---
+isaITS_abund_long <- isa_ITS_combined %>%
+  select(Species, col_abund, Abundance) %>%
+  rename(value = Abundance, col_id = col_abund)
+
+isaITS_pval_long <- isa_ITS_combined %>%
+  select(Species, col_pval, PValue) %>%
+  rename(value = PValue, col_id = col_pval)
+
+# --- Bind and pivot wider ---
+isaITS_final_long <- bind_rows(isaITS_abund_long, isaITS_pval_long)
+
+isaITS_final_wide <- isaITS_final_long %>%
+  pivot_wider(names_from = col_id, values_from = value)
+
+# --- Ensure proper column order: Root → Rhizo → Soil, with abundance and pval side-by-side ---
+ordered_cols_ITS <- expand.grid(
+  SampleType = c("Root", "Rhizo", "Soil"),
+  Treatment = c("Control", "M", "E", "ME"),
+  Metric = c("abund", "pval")
+) %>%
+  mutate(col_name = paste(SampleType, Treatment, Metric, sep = "_")) %>%
+  pull(col_name)
+
+# ✅ Step: Pad missing columns with NA so all expected columns are present
+isaITS_final_wide <- isaITS_final_wide %>%
+  # Add missing columns with NA values if needed
+  tibble::add_column(!!!setNames(
+    lapply(setdiff(ordered_cols_ITS, names(.)), function(x) NA_real_),
+    setdiff(ordered_cols_ITS, names(.))
+  )) %>%
+  # Reorder to match expected layout
+  select(Species, all_of(ordered_cols_ITS))
+# ✅ View and export
+View(isaITS_final_wide)
+write.csv(isaITS_final_wide, "ISA_ITS_Top20_Abundance_Pval_SideBySide.csv", row.names = FALSE)
+
+
+```
+
+
+```{r}
+isaITS_summary_table_percent <- isaITS_summary_table %>%
+  mutate(across(where(is.numeric), ~ round(.x * 100, 2)))
+
+# View in RStudio
+View(isaITS_summary_table_percent)
+```
+
+```{r}
+# Export as CSV
+write.csv(isaITS_summary_table_percent, "ISA_ITS_Top20_SummaryTable_Percent.csv", row.names = FALSE)
+```
+
+Phylum level analysis
+
+```{r}
+# --- Load required libraries ---
+library(tidyverse)
+library(viridis)
+
+# --- STEP 1: Prepare data ---
+phylum_16s_long <- ASV_16s %>%
+  select(starts_with("FFAR"), Phylum) %>%
+  pivot_longer(-Phylum, names_to = "sample_name", values_to = "Abundance") %>%
+  group_by(Phylum, sample_name) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  left_join(MD, by = "sample_name")
+
+# --- STEP 2: Identify Top 10 Phyla by Total Abundance ---
+top10_phyla_16s <- phylum_16s_long %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance), .groups = "drop") %>%
+  slice_max(order_by = Total, n = 10) %>%
+  pull(Phylum)
+
+# --- STEP 3: Filter to Top 10 & Summarize ---
+top10_16s_plot_data <- phylum_16s_long %>%
+  filter(Phylum %in% top10_phyla_16s) %>%
+  group_by(Type, Treatment, Phylum) %>%
+  summarise(Abundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")))
+
+# --- STEP 4: Plot ---
+ggplot(top10_16s_plot_data, aes(x = Treatment, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack") +
+  coord_flip() +  # 🔁 Horizontal
+  facet_wrap(~Type) +
+  scale_fill_viridis_d(option = "D") +
+  theme_minimal() +
+  labs(
+    title = "Top 10 Phyla Abundance (16S)",
+    x = "Treatment", y = "Total Abundance"
+  ) +
+  theme(
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "bottom"
+  )
+
+```
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(RColorBrewer)
+
+# --- STEP 1: Prepare phylum-wise long data ---
+phylum_16s_long <- ASV_16s %>%
+  select(starts_with("FFAR"), Phylum) %>%
+  pivot_longer(-Phylum, names_to = "sample_name", values_to = "Abundance") %>%
+  left_join(MD, by = "sample_name") %>%
+  group_by(sample_name) %>%
+  mutate(Percent = Abundance / sum(Abundance) * 100) %>%
+  ungroup()
+
+# --- STEP 2: Select top 10 phyla ---
+top10_phyla_16s <- phylum_16s_long %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(Total, n = 10) %>%
+  pull(Phylum)
+
+# --- STEP 3: Filter for top phyla and summarize % ---
+plot_data_16s <- phylum_16s_long %>%
+  filter(Phylum %in% top10_phyla_16s) %>%
+  group_by(Type, Treatment, Phylum) %>%
+  summarise(Percent = mean(Percent, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")))
+
+# --- STEP 4: Use bright color palette ---
+palette_10 <- brewer.pal(10, "Paired")
+
+# --- STEP 5: Plot with % scale ---
+ggplot(plot_data_16s, aes(x = Treatment, y = Percent, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack") +
+  coord_flip() +
+  facet_wrap(~Type) +
+  scale_fill_manual(values = palette_10) +
+  theme_minimal() +
+  labs(
+    title = "Top 10 Phyla Abundance (16S)",
+    x = "Treatment",
+    y = "Relative Abundance (%)"
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 13, face = "bold"),
+    axis.text = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(RColorBrewer)
+
+# --- STEP 1: Prepare long-format ITS phylum abundance ---
+phylum_ITS_long <- ASV_ITS %>%
+  select(starts_with("FFAR"), Phylum) %>%
+  pivot_longer(-Phylum, names_to = "sample_name", values_to = "Abundance") %>%
+  left_join(MD, by = "sample_name") %>%
+  group_by(sample_name) %>%
+  mutate(Percent = Abundance / sum(Abundance) * 100) %>%
+  ungroup()
+
+# --- STEP 2: Select top 10 most abundant phyla ---
+top10_phyla_ITS <- phylum_ITS_long %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  slice_max(Total, n = 10) %>%
+  pull(Phylum)
+
+# --- STEP 3: Filter to top 10 and compute average percentage per Treatment × Type
+plot_data_ITS <- phylum_ITS_long %>%
+  filter(Phylum %in% top10_phyla_ITS) %>%
+  group_by(Type, Treatment, Phylum) %>%
+  summarise(Percent = mean(Percent, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Type = factor(Type, levels = c("root", "rhizo", "soil")))
+
+# --- STEP 4: Use bright palette (Paired from RColorBrewer) ---
+bright_palette <- brewer.pal(10, "Paired")
+
+# --- STEP 5: Horizontal stacked bar plot ---
+ggplot(plot_data_ITS, aes(x = Treatment, y = Percent, fill = Phylum)) +
+  geom_bar(stat = "identity", position = "stack") +
+  coord_flip() +
+  facet_wrap(~Type) +
+  scale_fill_manual(values = bright_palette) +
+  theme_minimal() +
+  labs(
+    title = "Top 10 Phyla Abundance (ITS)",
+    x = "Treatment",
+    y = "Relative Abundance (%)"
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 13, face = "bold"),
+    axis.text = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+```
+
+
+
